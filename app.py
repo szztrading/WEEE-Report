@@ -22,8 +22,8 @@ with st.expander("使用说明（简要）", expanded=False):
            - **M列** → 产品类型（映射到德国 WEEE 六大类别之一）  
            - **W列** → 重量（将进行求和）  
            - **月份列** → 用于按 **YYYY-MM** 生成每月申报文件名  
-        3) 如产品类型→WEEE 类别的映射未知，请在“产品类型映射”中上传/编辑。  
-        4) 点击 **生成报表**，即可下载分月汇总的 CSV（文件名形如 `WEEE_DE_YYYY-MM.csv`）。
+        3) 在侧边栏 **时间/月份** 区域选择生成月份（可按数据多选，或手动指定一个月）。  
+        4) 点击 **生成报表**（上传后自动汇总），可下载按月 CSV 或打包 ZIP。
         """
     )
 
@@ -47,7 +47,31 @@ map_mode = st.sidebar.radio(
 )
 
 default_indices = {"country": 5, "scope": 10, "ptype": 12, "weight": 22}
-month_hint_names = ["month", "reporting month", "reporting_month", "month_of_report", "date", "order date", "period"]
+
+# --------------------------
+# Sidebar – Month / Time controls (always visible)
+# --------------------------
+st.sidebar.header("时间 / 月份")
+
+# 计算“上一个自然月”
+_today = dt.date.today()
+_first_this_month = _today.replace(day=1)
+_prev_month_day = _first_this_month - dt.timedelta(days=1)
+_prev_month_str = _prev_month_day.strftime("%Y-%m")
+_prev_month_first = _prev_month_day.replace(day=1)
+
+month_mode = st.sidebar.radio(
+    "月份选择方式",
+    ["按数据解析（多选）", "手动指定（单月）"],
+    index=0
+)
+
+# 手动模式的日期输入（始终可见）
+manual_month_date = st.sidebar.date_input(
+    "手动选择月份（选任意该月的一天）",
+    value=_prev_month_first
+)
+manual_month_str = manual_month_date.strftime("%Y-%m") if isinstance(manual_month_date, dt.date) else _prev_month_str
 
 # --------------------------
 # Product type → WEEE category mapping
@@ -72,7 +96,6 @@ with st.sidebar.expander("说明与模板", expanded=False):
 uploaded_map = st.sidebar.file_uploader("上传产品类型映射（CSV）", type=["csv"], key="map_upload", accept_multiple_files=False)
 
 if "ptype_map_df" not in st.session_state:
-    # provide a tiny starter mapping
     st.session_state.ptype_map_df = pd.DataFrame(
         {"product_type": ["example_heater", "example_pump"], "weee_category": [4, 5]}
     )
@@ -80,7 +103,6 @@ if "ptype_map_df" not in st.session_state:
 if uploaded_map is not None:
     try:
         df_map = pd.read_csv(uploaded_map)
-        # normalize columns
         cols = [c.strip().lower() for c in df_map.columns]
         df_map.columns = cols
         if not {"product_type", "weee_category"}.issubset(set(df_map.columns)):
@@ -121,7 +143,6 @@ def _read_one(f) -> pd.DataFrame:
             df = pd.read_excel(f, dtype=str)
     return df
 
-# Normalize: give access to both index-based and name-based selection
 def _extract_columns(df: pd.DataFrame,
                      map_mode: str,
                      col_indices: Dict[str,int],
@@ -140,13 +161,11 @@ def _extract_columns(df: pd.DataFrame,
             raise KeyError(f"未找到列名：{name}")
         return d[lc[key]]
 
-    # Country / Scope / Product type / Weight
     if map_mode == "按列序号（F/K/M/W）":
         country = _get_by_index(dff, col_indices["country"])
         scope = _get_by_index(dff, col_indices["scope"])
         ptype = _get_by_index(dff, col_indices["ptype"])
         weight = _get_by_index(dff, col_indices["weight"])
-        # month heuristic
         month_series = None
         for c in dff.columns:
             if any(h in c.strip().lower() for h in { "month", "reporting", "period", "date"}):
@@ -176,16 +195,14 @@ def _extract_columns(df: pd.DataFrame,
         "weight_raw": weight,
         "month_raw": month_series
     })
-    # Clean weight
+
     out["weight_kg"] = (
-        out["weight_raw"]
-        .astype(str)
+        out["weight_raw"].astype(str)
         .str.replace(",", ".", regex=False)
         .str.extract(r"([-+]?\d*\.?\d+)")[0]
     )
     out["weight_kg"] = pd.to_numeric(out["weight_kg"], errors="coerce").fillna(0.0)
 
-    # Normalize month to YYYY-MM
     def norm_month(x: str) -> Optional[str]:
         if x is None:
             return None
@@ -200,8 +217,8 @@ def _extract_columns(df: pd.DataFrame,
         ]
         for f in fmts:
             try:
-                dt = datetime.strptime(s, f)
-                return dt.strftime("%Y-%m")
+                dtp = datetime.strptime(s, f)
+                return dtp.strftime("%Y-%m")
             except Exception:
                 pass
         try:
@@ -249,13 +266,11 @@ if files:
             dfs.append(slim)
         except Exception as e:
             st.error(f"文件 `{f.name}` 解析失败：{e}")
-    if dfs:
-        data = pd.concat(dfs, ignore_index=True)
+    data = pd.concat(dfs, ignore_index=True) if dfs else None
+    if data is not None:
         st.success(f"已载入 {len(files)} 个文件，共 {len(data)} 条记录。")
         with st.expander("查看提取后的预览", expanded=False):
             st.dataframe(data.head(50), use_container_width=True)
-    else:
-        data = None
 else:
     data = None
 
@@ -264,13 +279,11 @@ else:
 # --------------------------
 def build_report(df: pd.DataFrame, ptype_map_df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    # Filter DE + EEE
     d = d[(d["country"].astype(str).str.strip().str.upper() == "DE") &
           (d["scope"].astype(str).str.strip().str.upper() == "EEE")]
     if d.empty:
         return d
 
-    # Map product_type -> weee_category
     map_dict = dict(
         (str(r["product_type"]).strip(), int(r["weee_category"]))
         for _, r in ptype_map_df.iterrows()
@@ -278,7 +291,6 @@ def build_report(df: pd.DataFrame, ptype_map_df: pd.DataFrame) -> pd.DataFrame:
     )
     d["weee_category"] = d["product_type"].map(lambda x: map_dict.get(str(x).strip(), None))
 
-    # Warn for unmapped
     unmapped = sorted(set(d.loc[d["weee_category"].isna(), "product_type"].dropna().astype(str)))
     if unmapped:
         st.warning(f"存在未映射的产品类型（将被忽略汇总）：{', '.join(unmapped[:30])}" + (" ..." if len(unmapped) > 30 else ""))
@@ -289,60 +301,56 @@ def build_report(df: pd.DataFrame, ptype_map_df: pd.DataFrame) -> pd.DataFrame:
 
     d["weee_category"] = d["weee_category"].astype(int)
 
-    # Month fallback: if missing, fill with one global month chosen by user
     if "month" not in d.columns or d["month"].isna().all():
         st.info("未成功解析月份。请在侧边栏改用‘按列名’映射指定月份列；或在下方选择一个统一月份。")
-        month_pick = st.selectbox("统一申报月份（YYYY-MM）", options=[datetime.now().strftime("%Y-%m")])
-        d["month"] = month_pick
+        d["month"] = datetime.now().strftime("%Y-%m")
 
-    # Group and sum weight
     grp = (
         d.groupby(["month", "weee_category"], as_index=False)["weight_kg"]
         .sum()
         .rename(columns={"weight_kg": "total_weight_kg"})
     )
-    # Sort for readability
-    grp = grp.sort_values(["month", "weee_category"]).reset_index(drop=True)
-    return grp
+    return grp.sort_values(["month", "weee_category"]).reset_index(drop=True)
 
 if data is not None and not data.empty:
     result = build_report(data, st.session_state.ptype_map_df)
+
     if result is not None and not result.empty:
-        # --- Month selection UI (默认上一个月；若不存在则全选) ---
+        # ---- 月份过滤：两种模式 ----
         all_months = sorted(result["month"].dropna().unique().tolist())
 
-        today = dt.date.today()
-        first_this_month = today.replace(day=1)
-        prev_month_day = first_this_month - dt.timedelta(days=1)
-        prev_month_str = prev_month_day.strftime("%Y-%m")
-
-        default_months = [prev_month_str] if prev_month_str in all_months else all_months
-
-        st.sidebar.subheader("选择生成报表的月份")
-        selected_months = st.sidebar.multiselect(
-            "选择一个或多个月份（YYYY-MM）",
-            options=all_months,
-            default=default_months
-        )
-        if selected_months:
-            result = result[result["month"].isin(selected_months)].copy()
+        if month_mode == "按数据解析（多选）":
+            # 默认上一个月；若不存在则全选
+            default_months = [_prev_month_str] if _prev_month_str in all_months else all_months
+            st.sidebar.subheader("按数据解析的月份（多选）")
+            selected_months = st.sidebar.multiselect(
+                "选择一个或多个月份（YYYY-MM）",
+                options=all_months,
+                default=default_months
+            )
+            if selected_months:
+                result = result[result["month"].isin(selected_months)].copy()
+            else:
+                st.info("未选择月份，将不生成任何报表。")
+                st.stop()
         else:
-            st.info("未选择月份，将不生成任何报表。")
-            st.stop()
+            # 手动指定（单月）
+            target = manual_month_str
+            if target not in all_months:
+                st.sidebar.info(f"所选手动月份 {target} 在当前数据中未找到，将生成空结果文件。")
+            result = result[result["month"] == target].copy()
 
         st.subheader("汇总结果（已按所选月份过滤）")
         st.dataframe(result, use_container_width=True)
 
-        # Split by month & offer downloads
-        months = result["month"].unique().tolist()
-        months.sort()
+        # ---- 导出（按月拆分）----
+        months = sorted(result["month"].dropna().unique().tolist())
         out_zip = io.BytesIO()
         with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for m in months:
                 df_m = result[result["month"] == m].copy()
                 fname = f"WEEE_DE_{m}.csv"
-                csv_bytes = df_m.to_csv(index=False).encode("utf-8-sig")
-                zf.writestr(fname, csv_bytes)
+                zf.writestr(fname, df_m.to_csv(index=False).encode("utf-8-sig"))
 
         st.download_button(
             "📦 下载所有月份 CSV（ZIP）",
