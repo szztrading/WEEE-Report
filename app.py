@@ -313,8 +313,20 @@ def build_report(df: pd.DataFrame, ptype_map_df: pd.DataFrame) -> pd.DataFrame:
 if data is not None and not data.empty:
     result = build_report(data, st.session_state.ptype_map_df)
     if result is not None and not result.empty:
-        st.subheader("汇总结果")
-        st.dataframe(result, use_container_width=True)
+        # --- Month selection UI ---
+        all_months = sorted(result["month"].dropna().unique().tolist())
+        st.sidebar.subheader("选择生成报表的月份")
+        selected_months = st.sidebar.multiselect("选择一个或多个月份（YYYY-MM）", options=all_months, default=all_months)
+        if selected_months:
+            result = result[result["month"].isin(selected_months)].copy()
+        else:
+            st.info("未选择月份，将不生成任何报表。")
+
+        st.subheader("汇总结果（已按所选月份过滤）")
+        if not result.empty:
+            st.dataframe(result, use_container_width=True)
+        else:
+            st.stop()
 
         # Split by month & offer downloads
         months = result["month"].unique().tolist()
